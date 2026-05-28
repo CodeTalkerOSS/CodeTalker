@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.codex/hooks/codetalker_hook.swift\"",
+            "timeout": 10,
+            "statusMessage": "Notifying Code Talker"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.codex/hooks/codetalker_hook.swift\"",
+            "timeout": 10,
+            "statusMessage": "Notifying Code Talker"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.codex/hooks/codetalker_hook.swift\"",
+            "timeout": 10,
+            "statusMessage": "Notifying Code Talker"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.codex/hooks/codetalker_hook.swift\"",
+            "timeout": 10,
+            "statusMessage": "Notifying Code Talker"
+          }
+        ]
+      }
+    ]
+  }
+}
