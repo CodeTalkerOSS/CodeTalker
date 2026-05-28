@@ -1,0 +1,60 @@
+{
+  "originHash" : "033133227950924ca071090a084a608e5343a69494c4fb95f967971327c66d65",
+  "pins" : [
+    {
+      "identity" : "metacodable",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SwiftyLab/MetaCodable.git",
+      "state" : {
+        "revision" : "c2a6cc907e2f95463ba8f2b55432bd2aee8a4bfd",
+        "version" : "1.6.0"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "ca37474853a4b5f59a22c74bfdd449b1f6bc4cc2",
+        "version" : "1.8.1"
+      }
+    },
+    {
+      "identity" : "swift-collections",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-collections.git",
+      "state" : {
+        "revision" : "fea17c02d767f46b23070fdfdacc28a03a39232a",
+        "version" : "1.5.1"
+      }
+    },
+    {
+      "identity" : "swift-realtime-openai",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/m1guelpf/swift-realtime-openai.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "46f393d9e2e60724aadc30062f75ee73bbcdb8fc"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax.git",
+      "state" : {
+        "revision" : "4799286537280063c85a32f09884cfbca301b1a1",
+        "version" : "602.0.0"
+      }
+    },
+    {
+      "identity" : "webrtc-xcframework",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/livekit/webrtc-xcframework.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "6a5f458cf55a598e4590cb30b739ab545fdbfcb1"
+      }
+    }
+  ],
+  "version" : 3
+}

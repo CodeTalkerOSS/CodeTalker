@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0D41D7902FC7CC8D002B7AE6 /* RealtimeAPI in Frameworks */ = {isa = PBXBuildFile; productRef = 0D41D78F2FC7CC8D002B7AE6 /* RealtimeAPI */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		0D3DCA5A2FC7C457001634E2 /* CodeTalker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodeTalker.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0D41D7902FC7CC8D002B7AE6 /* RealtimeAPI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = CodeTalker;
 			packageProductDependencies = (
+				0D41D78F2FC7CC8D002B7AE6 /* RealtimeAPI */,
 			);
 			productName = CodeTalker;
 			productReference = 0D3DCA5A2FC7C457001634E2 /* CodeTalker.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = 0D3DCA512FC7C457001634E2;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				0D41D78E2FC7CC8D002B7AE6 /* XCRemoteSwiftPackageReference "swift-realtime-openai" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0D3DCA5B2FC7C457001634E2 /* Products */;
 			projectDirPath = "";
@@ -345,6 +354,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		0D41D78E2FC7CC8D002B7AE6 /* XCRemoteSwiftPackageReference "swift-realtime-openai" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/m1guelpf/swift-realtime-openai.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0D41D78F2FC7CC8D002B7AE6 /* RealtimeAPI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0D41D78E2FC7CC8D002B7AE6 /* XCRemoteSwiftPackageReference "swift-realtime-openai" */;
+			productName = RealtimeAPI;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 0D3DCA522FC7C457001634E2 /* Project object */;
 }
