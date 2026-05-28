@@ -9,9 +9,19 @@ import SwiftUI
 
 @main
 struct CodeTalkerApp: App {
+#if os(macOS)
+    @NSApplicationDelegateAdaptor(CodeTalkerAppDelegate.self) private var appDelegate
+#endif
+
     var body: some Scene {
+#if os(macOS)
+        Settings {
+            EmptyView()
+        }
+#else
         WindowGroup {
             ContentView()
         }
+#endif
     }
 }

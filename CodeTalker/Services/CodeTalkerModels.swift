@@ -118,5 +118,6 @@ nonisolated public enum CodeTalkerServiceError: Error, Equatable, Sendable {
 nonisolated public enum OpenAIRealtimeVoiceClientError: Error, Equatable, Sendable {
     case realtimePackageUnavailable
     case transcriptUnavailable
+    case missingRealtimeEphemeralKey
     case cancelled
 }
