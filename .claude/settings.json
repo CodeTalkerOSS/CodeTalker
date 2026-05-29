@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__codetalker__ask",
+      "mcp__codetalker__speak"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
