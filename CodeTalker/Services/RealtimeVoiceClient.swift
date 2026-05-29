@@ -4,6 +4,9 @@ nonisolated public protocol RealtimeVoiceClient: Sendable {
     func playSummary(for request: RealtimeSpeechRequest) async throws -> RealtimeSpeechResult
     func pausePlayback(sessionId: CodingSession.ID) async throws
     func startListening(for request: RealtimeListenRequest) async throws -> RealtimeListeningSession
+    /// Hard-disconnect any persistent playback connection so WebRTC audio
+    /// frames stop draining locally. The next playSummary lazily reconnects.
+    func resetPlayback() async
 }
 
 nonisolated public protocol CodexSessionInputSink: Sendable {
@@ -56,8 +59,11 @@ nonisolated public struct OpenAIRealtimeVoiceConfiguration: Equatable, Sendable 
         temperature: Double = 0.8,
         maxResponseOutputTokens: Int = 220,
         transcriptionLanguage: String? = "en",
-        transcriptionPrompt: String = "Technical dictation for a Codex coding agent session. Preserve file names, symbols, command names, and programming terminology.",
-        useSemanticTurnDetection: Bool = true,
+        transcriptionPrompt: String = "Technical dictation for a coding agent session. Preserve file names, symbols, command names, and programming terminology.",
+        // Server VAD with a fixed silence threshold gives the most predictable
+        // "speak, pause, send" behavior; semantic VAD can leave dictation
+        // hanging when the model is unsure if the sentence is complete.
+        useSemanticTurnDetection: Bool = false,
         debug: Bool = false
     ) {
         self.model = model
@@ -168,4 +174,6 @@ nonisolated public struct PreviewRealtimeVoiceClient: RealtimeVoiceClient {
             continuation.finish()
         }, stop: {})
     }
+
+    public func resetPlayback() async {}
 }

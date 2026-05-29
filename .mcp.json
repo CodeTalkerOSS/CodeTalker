@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codetalker": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/mcp/codetalker_mcp.swift\""
+      ]
+    }
+  }
+}

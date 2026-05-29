@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.cursor/hooks/codetalker_hook.swift\""
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.cursor/hooks/codetalker_hook.swift\""
+      }
+    ],
+    "stop": [
+      {
+        "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.cursor/hooks/codetalker_hook.swift\""
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "/usr/bin/swift -module-cache-path /private/tmp/codetalker-swift-module-cache \"$(git rev-parse --show-toplevel)/.cursor/hooks/codetalker_hook.swift\""
+      }
+    ]
+  }
+}

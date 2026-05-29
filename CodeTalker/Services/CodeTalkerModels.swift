@@ -11,6 +11,9 @@ nonisolated public struct CodingSession: Codable, Equatable, Identifiable, Senda
     public var latestPrompt: String?
     public var latestAssistantMessage: String?
     public var latestSpokenSummary: String?
+    public var latestPermissionPrompt: String?
+    /// Originating agent — "codex", "claude_code", "cursor", or nil for legacy events.
+    public var agent: String?
     public var updatedAt: Date
 
     public init(
@@ -24,6 +27,8 @@ nonisolated public struct CodingSession: Codable, Equatable, Identifiable, Senda
         latestPrompt: String? = nil,
         latestAssistantMessage: String? = nil,
         latestSpokenSummary: String? = nil,
+        latestPermissionPrompt: String? = nil,
+        agent: String? = nil,
         updatedAt: Date = Date()
     ) {
         self.id = id
@@ -36,6 +41,8 @@ nonisolated public struct CodingSession: Codable, Equatable, Identifiable, Senda
         self.latestPrompt = latestPrompt
         self.latestAssistantMessage = latestAssistantMessage
         self.latestSpokenSummary = latestSpokenSummary
+        self.latestPermissionPrompt = latestPermissionPrompt
+        self.agent = agent
         self.updatedAt = updatedAt
     }
 }
@@ -65,6 +72,8 @@ nonisolated public struct CodexHookEvent: Codable, Equatable, Sendable {
     public var model: String?
     public var permissionMode: String?
     public var voiceAction: String
+    /// Originating agent: "codex", "claude_code", "cursor", … Optional for legacy events.
+    public var agent: String?
     public var data: CodexHookEventData
 
     enum CodingKeys: String, CodingKey {
@@ -81,6 +90,7 @@ nonisolated public struct CodexHookEvent: Codable, Equatable, Sendable {
         case model
         case permissionMode = "permission_mode"
         case voiceAction = "voice_action"
+        case agent
         case data
     }
 }

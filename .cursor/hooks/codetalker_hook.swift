@@ -2,6 +2,22 @@
 
 import Foundation
 
+// Code Talker hook for Cursor (https://cursor.com/docs/hooks).
+//
+// Cursor pipes a JSON object on stdin to each hook command. All hooks share
+//   conversation_id, generation_id, model, hook_event_name, cursor_version,
+//   workspace_roots, user_email, transcript_path
+// plus event-specific fields:
+//   • sessionStart:        (no extra)
+//   • sessionEnd:          status
+//   • beforeSubmitPrompt:  prompt, attachments
+//   • stop:                status ("completed" | "aborted" | "error"), loop_count
+//   • beforeShellExecution / afterShellExecution: command, exit_code
+//   • preToolUse / postToolUse: tool_name, tool_input, tool_response
+//
+// Like Claude Code, Cursor's `stop` payload does NOT include the assistant
+// message. We tail `transcript_path` to extract the latest assistant text.
+
 private let schema = "codetalker.codex-hook.v1"
 private let defaultTimeoutSeconds = 0.6
 
@@ -65,57 +81,59 @@ struct HookEventData: Encodable {
     }
 }
 
-struct CodeTalkerHook {
+    struct CodeTalkerCursorHook {
     static func main() {
         do {
             let input = FileHandle.standardInput.readDataToEndOfFile()
             let payload = try decodePayload(from: input)
             let event = normalize(payload: payload, rawPayload: String(data: input, encoding: .utf8))
 
-            deliver("append") {
-                try append(event: event)
-            }
+            deliver("append") { try append(event: event) }
+            deliver("post") { try post(event: event) }
 
-            deliver("post") {
-                try post(event: event)
-            }
+            FileHandle.standardOutput.write(Data("{}\n".utf8))
         } catch {
-            debug("Code Talker hook ignored error: \(error)")
+            debug("Code Talker Cursor hook ignored error: \(error)")
+            FileHandle.standardOutput.write(Data("{}\n".utf8))
         }
     }
 
     private static func decodePayload(from data: Data) throws -> [String: Any] {
-        guard !data.isEmpty else {
-            return [:]
-        }
-
+        guard !data.isEmpty else { return [:] }
         let object = try JSONSerialization.jsonObject(with: data)
         return object as? [String: Any] ?? [:]
     }
 
     private static func normalize(payload: [String: Any], rawPayload: String?) -> HookEvent {
         let hookName = stringValue(payload, keys: ["hook_event_name", "hookEventName"]) ?? "Unknown"
-        let assistantMessage = stringValue(payload, keys: ["last_assistant_message", "lastAssistantMessage"]) ?? ""
+        let transcriptPath = stringValue(payload, keys: ["transcript_path", "transcriptPath"])
         let eventName = eventName(for: hookName)
 
         var voiceAction = "none"
         var data = HookEventData(rawPayload: rawPayload)
 
         switch hookName {
-        case "SessionStart":
-            data.source = stringValue(payload, keys: ["source"])
-        case "UserPromptSubmit":
+        case "sessionStart":
+            data.source = "startup"
+        case "beforeSubmitPrompt":
             data.prompt = stringValue(payload, keys: ["prompt"])
-        case "Stop":
+        case "stop":
+            let assistantMessage = transcriptPath.flatMap(lastAssistantMessage(transcriptPath:)) ?? ""
             voiceAction = assistantMessage.isEmpty ? "none" : "speak_summary"
             data.assistantMessage = assistantMessage
             data.summaryInstruction = "Summarize this coding-agent response into one or two spoken sentences."
-            data.stopHookActive = boolValue(payload, keys: ["stop_hook_active", "stopHookActive"]) ?? false
-        case "PermissionRequest":
+            // Surface the loop status so callers can debug aborted runs.
+            data.permissionReason = stringValue(payload, keys: ["status"])
+        case "beforeShellExecution":
             voiceAction = "announce_permission"
-            data.toolName = stringValue(payload, keys: ["tool_name", "toolName", "tool"])
-            data.command = stringValue(payload, keys: ["command", "input"])
-            data.permissionReason = stringValue(payload, keys: ["reason", "message", "permission_reason", "permissionReason"])
+            data.toolName = "Shell"
+            data.command = stringValue(payload, keys: ["command"])
+            data.permissionReason = "Cursor is about to run a shell command."
+        case "preToolUse":
+            data.toolName = stringValue(payload, keys: ["tool_name"])
+            if let toolInput = payload["tool_input"] as? [String: Any] {
+                data.command = stringValue(toolInput, keys: ["command", "file_path", "path", "url"])
+            }
         default:
             break
         }
@@ -127,31 +145,72 @@ struct CodeTalkerHook {
             hookEventName: hookName,
             createdAt: iso8601Now(),
             receivedUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
-            sessionId: stringValue(payload, keys: ["session_id", "sessionId"]),
-            turnId: stringValue(payload, keys: ["turn_id", "turnId"]),
-            cwd: stringValue(payload, keys: ["cwd"]),
-            transcriptPath: stringValue(payload, keys: ["transcript_path", "transcriptPath"]),
+            sessionId: stringValue(payload, keys: ["conversation_id", "session_id"]),
+            turnId: stringValue(payload, keys: ["generation_id"]),
+            cwd: firstWorkspaceRoot(payload) ?? stringValue(payload, keys: ["cwd"]),
+            transcriptPath: transcriptPath,
             model: stringValue(payload, keys: ["model"]),
-            permissionMode: stringValue(payload, keys: ["permission_mode", "permissionMode"]),
+            permissionMode: nil,
             voiceAction: voiceAction,
-            agent: "codex",
+            agent: "cursor",
             data: data
         )
     }
 
     private static func eventName(for hookName: String) -> String {
         switch hookName {
-        case "SessionStart":
-            return "session.started"
-        case "UserPromptSubmit":
-            return "user.prompt_submitted"
-        case "Stop":
-            return "assistant.response_ready"
-        case "PermissionRequest":
-            return "permission.requested"
-        default:
-            return "codex.hook"
+        case "sessionStart":         return "session.started"
+        case "sessionEnd":           return "session.ended"
+        case "beforeSubmitPrompt":   return "user.prompt_submitted"
+        case "stop":                 return "assistant.response_ready"
+        case "beforeShellExecution": return "permission.requested"
+        case "preToolUse":           return "tool.invoked"
+        case "postToolUse":          return "tool.completed"
+        default:                     return "cursor.hook"
         }
+    }
+
+    private static func firstWorkspaceRoot(_ payload: [String: Any]) -> String? {
+        if let roots = payload["workspace_roots"] as? [String], let first = roots.first {
+            return first
+        }
+        return nil
+    }
+
+    private static func lastAssistantMessage(transcriptPath: String) -> String? {
+        let url = URL(fileURLWithPath: NSString(string: transcriptPath).expandingTildeInPath)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        let size = (try? handle.seekToEnd()) ?? 0
+        let window: UInt64 = 512 * 1024
+        let offset = size > window ? size - window : 0
+        try? handle.seek(toOffset: offset)
+        guard let data = try? handle.readToEnd(),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        for line in lines.reversed() {
+            guard let lineData = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+
+            let role = stringValue(object, keys: ["role"]) ?? stringValue(object, keys: ["type"]) ?? ""
+            guard role == "assistant" else { continue }
+
+            if let text = stringValue(object, keys: ["text", "content"]), !text.isEmpty {
+                return text
+            }
+            if let message = object["message"] as? [String: Any] {
+                if let content = message["content"] as? String, !content.isEmpty { return content }
+                if let content = message["content"] as? [[String: Any]] {
+                    let parts = content.compactMap { stringValue($0, keys: ["text"]) }
+                    let joined = parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !joined.isEmpty { return joined }
+                }
+            }
+        }
+        return nil
     }
 
     private static func append(event: HookEvent) throws {
@@ -171,9 +230,7 @@ struct CodeTalkerHook {
         }
 
         let handle = try FileHandle(forWritingTo: logURL)
-        defer {
-            try? handle.close()
-        }
+        defer { try? handle.close() }
         try handle.seekToEnd()
         handle.write(data)
     }
@@ -183,9 +240,7 @@ struct CodeTalkerHook {
         guard
             let endpoint = environment["CODETALKER_HOOK_ENDPOINT"] ?? environment["CODETALKER_HOOK_URL"],
             let url = URL(string: endpoint)
-        else {
-            return
-        }
+        else { return }
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -196,25 +251,18 @@ struct CodeTalkerHook {
         request.timeoutInterval = hookTimeout()
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("CodeTalker-CodexHook/1", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodeTalker-CursorHook/1", forHTTPHeaderField: "User-Agent")
 
         let semaphore = DispatchSemaphore(value: 0)
-        let task = URLSession.shared.dataTask(with: request) { _, _, _ in
-            semaphore.signal()
-        }
+        let task = URLSession.shared.dataTask(with: request) { _, _, _ in semaphore.signal() }
         task.resume()
-
         if semaphore.wait(timeout: .now() + hookTimeout()) == .timedOut {
             task.cancel()
         }
     }
 
     private static func deliver(_ name: String, action: () throws -> Void) {
-        do {
-            try action()
-        } catch {
-            debug("Code Talker hook \(name) delivery failed: \(error)")
-        }
+        do { try action() } catch { debug("Code Talker Cursor hook \(name) delivery failed: \(error)") }
     }
 
     private static func eventLogURL() -> URL {
@@ -237,35 +285,16 @@ struct CodeTalkerHook {
 
     private static func stringValue(_ payload: [String: Any], keys: [String]) -> String? {
         for key in keys {
-            if let value = payload[key] as? String {
-                return value
-            }
-
-            if let value = payload[key] {
-                return String(describing: value)
-            }
+            if let value = payload[key] as? String { return value }
+            if let value = payload[key] { return String(describing: value) }
         }
-
-        return nil
-    }
-
-    private static func boolValue(_ payload: [String: Any], keys: [String]) -> Bool? {
-        for key in keys {
-            if let value = payload[key] as? Bool {
-                return value
-            }
-        }
-
         return nil
     }
 
     private static func debug(_ message: String) {
-        guard ProcessInfo.processInfo.environment["CODETALKER_HOOK_DEBUG"] == "1" else {
-            return
-        }
-
+        guard ProcessInfo.processInfo.environment["CODETALKER_HOOK_DEBUG"] == "1" else { return }
         FileHandle.standardError.write(Data("\(message)\n".utf8))
     }
 }
 
-CodeTalkerHook.main()
+CodeTalkerCursorHook.main()

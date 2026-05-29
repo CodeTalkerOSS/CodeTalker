@@ -99,6 +99,9 @@ public actor CodexSessionRepository {
         session.transcriptPath = event.transcriptPath ?? session.transcriptPath
         session.model = event.model ?? session.model
         session.permissionMode = event.permissionMode ?? session.permissionMode
+        if let agent = event.agent, !agent.isEmpty {
+            session.agent = agent
+        }
         session.updatedAt = eventDate(event) ?? session.updatedAt
 
         switch event.event {
@@ -112,11 +115,31 @@ public actor CodexSessionRepository {
             session.state = event.data.assistantMessage?.isEmpty == false ? .queued : .idle
         case "permission.requested":
             session.state = .needsPermission
+            session.latestPermissionPrompt = Self.permissionPrompt(from: event.data)
         default:
             break
         }
 
         sessions[sessionId] = session
+    }
+
+    private static func permissionPrompt(from data: CodexHookEventData) -> String {
+        var parts: [String] = []
+        if let tool = data.toolName, !tool.isEmpty {
+            parts.append("wants to use \(tool)")
+        }
+        if let command = data.command, !command.isEmpty {
+            parts.append("running: \(command)")
+        }
+        if let reason = data.permissionReason, !reason.isEmpty {
+            parts.append(reason)
+        }
+
+        if parts.isEmpty {
+            return "Codex is requesting permission to continue."
+        }
+
+        return "Codex \(parts.joined(separator: ", "))."
     }
 
     private func title(for event: CodexHookEvent) -> String {

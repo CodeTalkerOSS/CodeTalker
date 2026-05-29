@@ -13,7 +13,28 @@ private enum OverlayMetrics {
 final class CodeTalkerAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Mic permission only — Speech Recognition (SFSpeechRecognizer) is
+        // no longer used; Whisper handles transcription server-side.
+        requestMicrophoneAccess()
         CodeTalkerOverlayController.shared.show()
+    }
+
+    private func requestMicrophoneAccess() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized:
+            CodeTalkerOverlayModel.shared.setMicrophoneAuthorized(true)
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                Task { @MainActor in
+                    CodeTalkerOverlayModel.shared.setMicrophoneAuthorized(granted)
+                }
+            }
+        case .denied, .restricted:
+            CodeTalkerOverlayModel.shared.setMicrophoneAuthorized(false)
+        @unknown default:
+            CodeTalkerOverlayModel.shared.setMicrophoneAuthorized(false)
+        }
     }
 }
 
@@ -22,7 +43,14 @@ nonisolated public struct EnvironmentRealtimeEphemeralKeyProvider: RealtimeEphem
 
     public func ephemeralKey() async throws -> String {
         let environment = ProcessInfo.processInfo.environment
-        for key in ["CODETALKER_REALTIME_EPHEMERAL_KEY", "OPENAI_REALTIME_EPHEMERAL_KEY"] {
+        // A standard `sk-...` key works directly against the realtime /v1/realtime/calls
+        // endpoint for a local client, so OPENAI_API_KEY is accepted alongside the
+        // ephemeral-key variables. Set it in the Xcode scheme's environment.
+        for key in [
+            "CODETALKER_REALTIME_EPHEMERAL_KEY",
+            "OPENAI_REALTIME_EPHEMERAL_KEY",
+            "OPENAI_API_KEY"
+        ] {
             if let value = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
                !value.isEmpty {
                 return value
@@ -33,6 +61,9 @@ nonisolated public struct EnvironmentRealtimeEphemeralKeyProvider: RealtimeEphem
     }
 }
 
+/// Manual-mic captures (row mic button) land on the clipboard. The primary
+/// voice channel is the MCP server's `ask` tool, which has its own reply-file
+/// transport; this sink is just a fallback for the user-initiated case.
 nonisolated public struct ClipboardCodexInputSink: CodexSessionInputSink {
     public init() {}
 
@@ -44,32 +75,115 @@ nonisolated public struct ClipboardCodexInputSink: CodexSessionInputSink {
     }
 }
 
+/// Coding-agent identity, used for per-row color and symbol so users can tell
+/// Codex / Claude / Cursor sessions apart at a glance.
+private enum AgentKind {
+    case codex
+    case claudeCode
+    case cursor
+    case unknown
+
+    init(rawValue: String?) {
+        switch rawValue {
+        case "codex": self = .codex
+        case "claude_code": self = .claudeCode
+        case "cursor": self = .cursor
+        default: self = .unknown
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .codex:      return "Codex"
+        case .claudeCode: return "Claude"
+        case .cursor:     return "Cursor"
+        case .unknown:    return "Agent"
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .codex:      return NSColor.systemOrange
+        case .claudeCode: return NSColor.systemPurple
+        case .cursor:     return NSColor.systemBlue
+        case .unknown:    return NSColor.systemGray
+        }
+    }
+
+    /// Symbol shown when the session is idle (state-active rows override with
+    /// the state glyph — mic, speaker, lock, …).
+    var idleSymbol: String {
+        switch self {
+        case .codex:      return "chevron.left.forwardslash.chevron.right"
+        case .claudeCode: return "sparkles"
+        case .cursor:     return "cursorarrow.rays"
+        case .unknown:    return "terminal.fill"
+        }
+    }
+}
+
 private struct OverlaySessionRow {
     let id: CodingSession.ID
     let name: String
+    let subtitle: String
     let elapsedTime: String
     let summary: String
     let isRunning: Bool
-    let fallbackColor: NSColor
+    let agent: AgentKind
     let state: CodingSessionState
     let isSelected: Bool
+    let canSpeak: Bool
+    let hasPlayed: Bool
 
     init(session: CodingSession, isSelected: Bool) {
         self.id = session.id
-        self.name = session.title
+        self.agent = AgentKind(rawValue: session.agent)
+        self.name = Self.displayTitle(for: session)
+        self.subtitle = Self.subtitle(for: session, agent: agent)
         self.elapsedTime = Self.relativeTime(since: session.updatedAt)
         self.summary = session.latestSpokenSummary
             ?? session.latestAssistantMessage
-            ?? session.latestPrompt
-            ?? session.cwd
-            ?? "Waiting for Codex activity"
+            ?? session.latestPermissionPrompt
+            ?? "Waiting for activity"
         self.isRunning = [.queued, .waitingForResponse, .speaking, .listening].contains(session.state)
-        self.fallbackColor = Self.color(for: session.id)
         self.state = session.state
         self.isSelected = isSelected
+        self.canSpeak = session.latestAssistantMessage?.isEmpty == false
+            || session.latestPermissionPrompt?.isEmpty == false
+        self.hasPlayed = session.latestSpokenSummary?.isEmpty == false
     }
 
-    private static func relativeTime(since date: Date) -> String {
+    /// Prefer the user's most recent prompt as the row title (most identifying).
+    /// Fall back to the repo / cwd basename when no prompt has come through yet.
+    private static func displayTitle(for session: CodingSession) -> String {
+        if let prompt = session.latestPrompt?
+            .components(separatedBy: .newlines)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !prompt.isEmpty {
+            return Self.truncate(prompt, max: 48)
+        }
+        if !session.title.isEmpty { return session.title }
+        if let cwd = session.cwd {
+            return URL(fileURLWithPath: cwd).lastPathComponent
+        }
+        return "Untitled session"
+    }
+
+    private static func subtitle(for session: CodingSession, agent: AgentKind) -> String {
+        var parts: [String] = [agent.displayName]
+        if let cwd = session.cwd {
+            parts.append(URL(fileURLWithPath: cwd).lastPathComponent)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func truncate(_ s: String, max: Int) -> String {
+        if s.count <= max { return s }
+        return String(s.prefix(max - 1)) + "…"
+    }
+
+    static func relativeTime(since date: Date) -> String {
         let seconds = max(0, Int(Date().timeIntervalSince(date)))
         if seconds < 60 {
             return "\(seconds)s"
@@ -83,24 +197,77 @@ private struct OverlaySessionRow {
         return "\(minutes / 60)h"
     }
 
-    private static func color(for value: String) -> NSColor {
-        let colors: [NSColor] = [.systemBlue, .systemOrange, .systemPurple, .systemGreen, .systemPink]
-        return colors[abs(value.hashValue) % colors.count]
-    }
 }
 
 @MainActor
 private final class CodeTalkerOverlayModel {
     static let shared = CodeTalkerOverlayModel()
 
+    enum VoiceTurnKind {
+        case response
+        case permission
+    }
+
+    private struct VoiceTurnRequest: Equatable {
+        let sessionId: CodingSession.ID
+        let kind: VoiceTurnKind
+        /// Auto-turns include the VAD reply window; manual play / replay does not.
+        let allowReply: Bool
+        /// If set, speak this verbatim text instead of the session's stored
+        /// latest message — used by `mcp__codetalker__speak`/`ask`.
+        let mcpText: String?
+        /// If set, the captured reply (when allowReply=true) is written to
+        /// `~/.codetalker/mcp-replies/<this>.txt` so the MCP `ask` call can
+        /// return it to the agent as the tool result.
+        let mcpReplyId: String?
+
+        init(
+            sessionId: CodingSession.ID,
+            kind: VoiceTurnKind,
+            allowReply: Bool,
+            mcpText: String? = nil,
+            mcpReplyId: String? = nil
+        ) {
+            self.sessionId = sessionId
+            self.kind = kind
+            self.allowReply = allowReply
+            self.mcpText = mcpText
+            self.mcpReplyId = mcpReplyId
+        }
+    }
+
     private let service: CodeTalkerSessionService
     private var refreshTask: Task<Void, Never>?
     private var listeningSession: CodeTalkerListeningSession?
+    private var manualListenSessionId: CodingSession.ID?
     private var currentSessions: [CodingSession] = []
+
+    // Speech queue: only one session speaks at a time. New triggers (auto-detect,
+    // hover, manual play) append a request; a single worker drains the queue in
+    // FIFO order. `activeTurnSessionId` is the session currently in flight,
+    // and `currentTurnTask` is the cancellable task running it.
+    // `activeMcpReplyId` is set while the in-flight turn was triggered by an
+    // MCP `ask` call — when Stop fires, we write a cancel sentinel to the
+    // matching reply file so the blocked MCP server returns to the agent.
+    private var voiceQueue: [VoiceTurnRequest] = []
+    private var voiceWorker: Task<Void, Never>?
+    private var currentTurnTask: Task<Void, Never>?
+    private var activeTurnSessionId: CodingSession.ID?
+    private var activeMcpReplyId: String?
+
+    // MCP event tail state — remembers which event ids we've already
+    // converted into voice turns so the poll never double-fires.
+    // `mcpEventsCutoff` is set at model init; any event whose `created_at`
+    // is older than that timestamp is dropped (it's from a prior app run).
+    // This avoids the seed-on-first-file-found race where the very first
+    // event a server writes after launch gets eaten by the seeder.
+    private var consumedMCPEventIds: Set<String> = []
+    private let mcpEventsCutoff: Date = Date()
 
     private(set) var rows: [OverlaySessionRow] = []
     private(set) var isListening = false
     private(set) var statusMessage = "Loading sessions..."
+    private(set) var microphoneAuthorized: Bool = true
     private var selectedSessionId: CodingSession.ID?
 
     var onChange: (() -> Void)?
@@ -114,6 +281,14 @@ private final class CodeTalkerOverlayModel {
         )
     ) {
         self.service = service
+    }
+
+    func setMicrophoneAuthorized(_ authorized: Bool) {
+        microphoneAuthorized = authorized
+        if !authorized {
+            statusMessage = "Microphone access denied — System Settings → Privacy → Microphone → CodeTalker"
+        }
+        onChange?()
     }
 
     func startRefreshing() {
@@ -139,36 +314,356 @@ private final class CodeTalkerOverlayModel {
         }
     }
 
+    /// Mic button. Single-purpose toggle:
+    ///   - If anything is speaking, listening, or queued → stop *everything*.
+    ///   - Otherwise → open a manual listen for the selected session.
+    /// No more accidental "switches to another session" surprises.
     func toggleListening() {
         Task {
-            if isListening {
-                await stopListening()
+            if isListening || isSpeakingOrQueued {
+                await stopAllVoice()
             } else {
                 await startListening()
             }
         }
     }
 
-    func playSelectedResponse() {
-        guard let sessionId = selectedSessionId ?? rows.first?.id else {
-            statusMessage = "No Codex sessions yet"
+    /// Cancel the queue, in-flight turn, and any manual listening. Used by the
+    /// mic button when something is in flight.
+    private func stopAllVoice() async {
+        VoiceDiagnosticLog.log("stopAllVoice: active=\(activeTurnSessionId ?? "nil") queue=\(voiceQueue.count) mcpReply=\(activeMcpReplyId ?? "nil")")
+        // Unblock the MCP server if an `ask` was waiting, so the agent's
+        // tool call returns instead of hanging until its timeout.
+        if let mcpReplyId = activeMcpReplyId {
+            Self.writeMCPReply("(stopped)", for: mcpReplyId)
+        }
+        // Also drop any queued MCP asks so the same thing happens to them.
+        for queued in voiceQueue {
+            if let replyId = queued.mcpReplyId {
+                Self.writeMCPReply("(stopped)", for: replyId)
+            }
+        }
+        voiceQueue.removeAll()
+        let stoppingId = activeTurnSessionId
+        if let stoppingId {
+            try? await service.pauseSessionResponse(stoppingId)
+        }
+        currentTurnTask?.cancel()
+        voiceWorker?.cancel()
+        voiceWorker = nil
+        activeTurnSessionId = nil
+
+        await listeningSession?.stop()
+        listeningSession = nil
+        isListening = false
+
+        // Hard-disconnect the WebRTC playback peer so the audio engine
+        // actually stops — server-side cancel events alone don't drop the
+        // frames already streamed locally.
+        await service.resetPlayback()
+
+        // Optimistic UI flip so the row's stop button immediately becomes a
+        // replay icon, without waiting for the next 2s refresh.
+        if let stoppingId,
+           let idx = currentSessions.firstIndex(where: { $0.id == stoppingId }) {
+            currentSessions[idx].state = .paused
+        }
+        statusMessage = "Stopped"
+        rebuildRows()
+        onChange?()
+    }
+
+    private func rebuildRows() {
+        rows = currentSessions.map { session in
+            OverlaySessionRow(session: session, isSelected: session.id == selectedSessionId)
+        }
+    }
+
+    /// Talk to a specific session: stop anything in flight, free the mic from
+    /// the persistent playback peer, then open a listening window for this
+    /// session. The transcribed reply is submitted via the input sink and
+    /// picked up by the agent's Stop hook (decision:block / followup_message).
+    func talkToSession(_ id: CodingSession.ID) {
+        selectedSessionId = id
+        Task {
+            await stopAllVoice()
+            guard microphoneAuthorized else {
+                statusMessage = "Microphone access denied — System Settings → Privacy → Microphone → CodeTalker"
+                onChange?()
+                return
+            }
+            await startListening()
+        }
+    }
+
+    /// Stop a session — handles every active state:
+    ///   • worker auto-turn for this session (speaking or auto-listening)
+    ///   • manual listening on this session
+    ///   • a queued turn waiting on this session
+    /// The queue continues with the next item either way. If the in-flight
+    /// turn was an MCP `ask`, also write a `(stopped)` sentinel to the MCP
+    /// reply file so the blocked tool call returns.
+    func stopSpeaking(for id: CodingSession.ID) {
+        // Unblock any MCP asks for this session.
+        for queued in voiceQueue where queued.sessionId == id {
+            if let replyId = queued.mcpReplyId {
+                Self.writeMCPReply("(stopped)", for: replyId)
+            }
+        }
+        let removed = voiceQueue.contains { $0.sessionId == id }
+        voiceQueue.removeAll { $0.sessionId == id }
+
+        var didStop = false
+
+        if activeTurnSessionId == id {
+            if let mcpReplyId = activeMcpReplyId {
+                Self.writeMCPReply("(stopped)", for: mcpReplyId)
+            }
+            // Yank the runTurn task and hard-disconnect WebRTC so the audio
+            // engine releases. Server-side cancelResponse alone doesn't drop
+            // frames that are already buffered locally over WebRTC.
+            currentTurnTask?.cancel()
+            Task {
+                try? await service.pauseSessionResponse(id)
+                await service.resetPlayback()
+            }
+            didStop = true
+        }
+
+        if manualListenSessionId == id {
+            // Stop manual listening this very tick — release listening
+            // session, flip isListening so the UI updates.
+            let session = listeningSession
+            listeningSession = nil
+            manualListenSessionId = nil
+            isListening = false
+            Task { await session?.stop() }
+            didStop = true
+        }
+
+        if didStop {
+            // Optimistic UI flip — the row's stop button becomes a mic icon
+            // immediately so the user sees the action took effect.
+            if let idx = currentSessions.firstIndex(where: { $0.id == id }) {
+                currentSessions[idx].state = .paused
+            }
+            statusMessage = "Stopped" + queueSuffix()
+        } else if removed {
+            statusMessage = "Removed from queue" + queueSuffix()
+        }
+        rebuildRows()
+        onChange?()
+    }
+
+    /// True while any turn is speaking or waiting in the queue. Used to give
+    /// the mic button stop-everything behavior when activity is in flight.
+    var isSpeakingOrQueued: Bool {
+        activeTurnSessionId != nil || !voiceQueue.isEmpty
+    }
+
+    /// Append a turn to the queue (deduping identical pending requests) and
+    /// kick the worker if it's idle. Single source of truth for the FIFO order.
+    private func enqueueVoiceTurn(_ turn: VoiceTurnRequest) {
+        if voiceQueue.contains(turn) { return }
+        voiceQueue.append(turn)
+        onChange?()
+        startQueueWorkerIfNeeded()
+    }
+
+    private func startQueueWorkerIfNeeded() {
+        guard voiceWorker == nil else { return }
+        voiceWorker = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, !self.voiceQueue.isEmpty {
+                let next = self.voiceQueue.removeFirst()
+                self.activeTurnSessionId = next.sessionId
+                self.activeMcpReplyId = next.mcpReplyId
+                self.selectedSessionId = next.sessionId
+                self.onChange?()
+
+                // Wrap the turn in its own cancellable task so stopSpeaking
+                // can yank just this turn without killing the worker.
+                let turnTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.runTurn(next)
+                }
+                self.currentTurnTask = turnTask
+                _ = await turnTask.value
+                self.currentTurnTask = nil
+                self.activeTurnSessionId = nil
+                self.activeMcpReplyId = nil
+                self.onChange?()
+            }
+            self.voiceWorker = nil
+            self.onChange?()
+        }
+    }
+
+    /// Executes a single queued turn: speak the response / permission, then
+    /// optionally open the VAD reply window and submit the transcript.
+    private func runTurn(_ turn: VoiceTurnRequest) async {
+        VoiceDiagnosticLog.log("runTurn: \(turn.sessionId) kind=\(turn.kind) allowReply=\(turn.allowReply)")
+        do {
+            if let mcpText = turn.mcpText {
+                statusMessage = (turn.mcpReplyId != nil
+                                 ? "Agent is asking via voice..."
+                                 : "Agent says...") + queueSuffix()
+                onChange?()
+                // Build a lightweight CodingSession to feed the realtime client
+                // since this turn may not correspond to a real Codex session.
+                let session = currentSessions.first(where: { $0.id == turn.sessionId })
+                    ?? CodingSession(id: turn.sessionId, title: "Code Talker", cwd: nil)
+                try await service.speakArbitraryMessage(mcpText, in: session)
+            } else {
+                switch turn.kind {
+                case .permission:
+                    statusMessage = "Speaking permission request..." + queueSuffix()
+                    onChange?()
+                    try await service.announceSessionPermission(turn.sessionId)
+                case .response:
+                    statusMessage = "Speaking latest response..." + queueSuffix()
+                    onChange?()
+                    try await service.playSessionLatestResponse(turn.sessionId)
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            VoiceDiagnosticLog.log("runTurn speak ERROR: \(error)")
+            statusMessage = "Could not speak: \(String(describing: error))"
             onChange?()
             return
         }
 
-        Task {
-            statusMessage = "Speaking latest response..."
+        guard turn.allowReply else {
+            statusMessage = "Finished speaking" + queueSuffix()
             onChange?()
+            await refresh()
+            return
+        }
 
-            do {
-                try await service.playSessionLatestResponse(sessionId)
-                statusMessage = "Finished speaking"
-                await refresh()
-            } catch {
-                statusMessage = "Could not speak: \(String(describing: error))"
-                onChange?()
+        guard microphoneAuthorized else {
+            VoiceDiagnosticLog.log("runTurn ABORT: mic not authorized")
+            statusMessage = "Microphone access denied — System Settings → Privacy → Microphone → CodeTalker"
+            onChange?()
+            return
+        }
+
+        // Free the mic for the listening peer. The persistent playback peer
+        // also has audio.input configured, and on macOS two simultaneous
+        // realtime peers fight for the input track — transcription on the
+        // listening peer silently never fires. Disconnect playback now; the
+        // next speak turn will lazily reconnect.
+        await service.resetPlayback()
+
+        statusMessage = "Listening for your reply..." + queueSuffix()
+        isListening = true
+        onChange?()
+
+        defer { isListening = false }
+
+        do {
+            let reply = try await service.captureAndSubmitResponse(turn.sessionId)
+            // If this turn originated from an MCP `ask`, hand the transcript
+            // back to the MCP server via the reply file — that's how the
+            // tool call returns text to the agent.
+            if let replyId = turn.mcpReplyId, let reply, !reply.isEmpty {
+                Self.writeMCPReply(reply, for: replyId)
+            }
+            statusMessage = (reply?.isEmpty == false)
+                ? "Sent your reply"
+                : "No reply captured (try again — speak then pause)"
+            await refresh()
+        } catch is CancellationError {
+            return
+        } catch {
+            statusMessage = "Could not capture reply: \(String(describing: error))"
+            onChange?()
+        }
+    }
+
+    /// Tails `~/.codetalker/mcp-events.jsonl` for new `speak` / `ask` events
+    /// from the codetalker MCP server and enqueues voice turns. Events whose
+    /// `created_at` is older than the app's launch timestamp are treated as
+    /// already-handled (they came from a prior session).
+    private func processMCPEvents() {
+        let url = Self.mcpEventsURL()
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else { return }
+
+        let targetSessionId = currentSessions.first?.id ?? "mcp:default"
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let lineData = String(line).data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let id = obj["id"] as? String else { continue }
+            if consumedMCPEventIds.contains(id) { continue }
+
+            // Drop events older than our launch cutoff — they belong to a
+            // previous app run and are not for us to handle.
+            if let createdStr = obj["created_at"] as? String,
+               let createdAt = iso.date(from: createdStr),
+               createdAt < mcpEventsCutoff {
+                consumedMCPEventIds.insert(id)
+                continue
+            }
+
+            guard let type = obj["type"] as? String else { continue }
+            consumedMCPEventIds.insert(id)
+            VoiceDiagnosticLog.log("processMCPEvents: handling \(type) id=\(id)")
+
+            switch type {
+            case "speak":
+                guard let message = obj["message"] as? String, !message.isEmpty else { continue }
+                enqueueVoiceTurn(VoiceTurnRequest(
+                    sessionId: targetSessionId,
+                    kind: .response,
+                    allowReply: false,
+                    mcpText: message
+                ))
+
+            case "ask":
+                guard let question = obj["question"] as? String, !question.isEmpty else { continue }
+                enqueueVoiceTurn(VoiceTurnRequest(
+                    sessionId: targetSessionId,
+                    kind: .response,
+                    allowReply: true,
+                    mcpText: question,
+                    mcpReplyId: id
+                ))
+
+            default:
+                continue
             }
         }
+    }
+
+    private static func mcpEventsURL() -> URL {
+        let env = ProcessInfo.processInfo.environment
+        let path = env["CODETALKER_DIR"].map { "\($0)/mcp-events.jsonl" }
+            ?? "\(NSHomeDirectory())/.codetalker/mcp-events.jsonl"
+        return URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+    }
+
+    private static func mcpReplyURL(for replyId: String) -> URL {
+        let env = ProcessInfo.processInfo.environment
+        let dirPath = env["CODETALKER_DIR"].map { "\($0)/mcp-replies" }
+            ?? "\(NSHomeDirectory())/.codetalker/mcp-replies"
+        let dir = URL(fileURLWithPath: NSString(string: dirPath).expandingTildeInPath)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(replyId).txt")
+    }
+
+    private static func writeMCPReply(_ reply: String, for replyId: String) {
+        let url = mcpReplyURL(for: replyId)
+        try? reply.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func queueSuffix() -> String {
+        voiceQueue.isEmpty ? "" : " · \(voiceQueue.count) queued"
     }
 
     func refresh() async {
@@ -189,6 +684,7 @@ private final class CodeTalkerOverlayModel {
                 && selectedSessionId != nil
                 && sessions.first(where: { $0.id == selectedSessionId })?.state != .listening
             if finishedListening {
+                manualListenSessionId = nil
                 listeningSession = nil
                 isListening = false
             }
@@ -204,6 +700,7 @@ private final class CodeTalkerOverlayModel {
             }
 
             onChange?()
+            processMCPEvents()
         } catch {
             statusMessage = "Could not load sessions: \(String(describing: error))"
             onChange?()
@@ -212,28 +709,54 @@ private final class CodeTalkerOverlayModel {
 
     private func startListening() async {
         guard let sessionId = selectedSessionId ?? rows.first?.id else {
-            statusMessage = "No Codex sessions yet"
+            statusMessage = "No sessions yet"
             onChange?()
             return
         }
 
+        // Hard-disconnect the persistent playback peer before opening the
+        // listening peer — otherwise both compete for the mic and the
+        // listening session never transcribes a final transcript.
+        await service.resetPlayback()
+        manualListenSessionId = sessionId
+
         do {
-            statusMessage = "Starting realtime microphone..."
+            statusMessage = "Listening — speak your reply"
             onChange?()
-            listeningSession = try await service.listenForSession(sessionId)
+            listeningSession = try await service.listenForSession(sessionId) { [weak self] event in
+                guard let self else { return }
+                await self.handleListenProgress(event)
+            }
             isListening = true
-            statusMessage = "Listening to selected session..."
             await refresh()
         } catch {
             isListening = false
             listeningSession = nil
+            manualListenSessionId = nil
             statusMessage = "Could not listen: \(String(describing: error))"
             onChange?()
         }
     }
 
+    private func handleListenProgress(_ event: RealtimeListenEvent) {
+        switch event {
+        case .transcriptDelta(let chunk):
+            statusMessage = "Heard \"" + chunk.trimmingCharacters(in: .whitespacesAndNewlines) + "\""
+        case .finalTranscript(let prompt):
+            let preview = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            statusMessage = "Sent: \"" + String(preview.prefix(60)) + "\""
+        case .ended:
+            // Captured & submitted (or window closed). Refresh resyncs row state.
+            break
+        case .failed(let reason):
+            statusMessage = "Listen failed: \(reason)"
+        }
+        onChange?()
+    }
+
     private func stopListening() async {
         await listeningSession?.stop()
+        manualListenSessionId = nil
         listeningSession = nil
         isListening = false
         statusMessage = "Stopped listening"
@@ -402,7 +925,7 @@ private final class SideNotchView: NSView {
     private var rowViews: [DockRowView] = []
     private let voiceInputBarView = VoiceInputBarView()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let speakerButton = IconButtonView(systemName: "speaker.wave.2.fill")
+    private let settingsButton = IconButtonView(systemName: "gearshape")
     private let model = CodeTalkerOverlayModel.shared
 
     override init(frame frameRect: NSRect) {
@@ -578,11 +1101,11 @@ private final class SideNotchView: NSView {
             height: 32
         )
 
-        speakerButton.frame = CGRect(
-            x: panelWidth - rightPadding - 28,
-            y: bounds.height - bottomPadding - 30,
-            width: 28,
-            height: 28
+        settingsButton.frame = CGRect(
+            x: panelWidth - rightPadding - 22,
+            y: topPadding,
+            width: 22,
+            height: 22
         )
     }
 
@@ -598,10 +1121,18 @@ private final class SideNotchView: NSView {
         statusLabel.maximumNumberOfLines = 2
         addSubview(statusLabel)
 
-        speakerButton.onClick = { [weak model] in
-            model?.playSelectedResponse()
+        settingsButton.onClick = {
+            NSApp.activate(ignoringOtherApps: true)
+            // macOS 14+ uses showSettingsWindow:, older releases used the
+            // showPreferencesWindow: selector. Try the newer first.
+            let modern = Selector(("showSettingsWindow:"))
+            if NSApp.responds(to: modern) {
+                NSApp.sendAction(modern, to: nil, from: nil)
+            } else {
+                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            }
         }
-        addSubview(speakerButton)
+        addSubview(settingsButton)
     }
 
     private func reloadRows() {
@@ -610,13 +1141,16 @@ private final class SideNotchView: NSView {
         }
         rowViews.removeAll()
 
-        voiceInputBarView.setListening(model.isListening)
+        voiceInputBarView.setListening(model.isListening || model.isSpeakingOrQueued)
         statusLabel.stringValue = model.statusMessage
 
         for row in model.rows.prefix(6) {
-            let view = DockRowView(item: row) { [weak model] in
-                model?.selectSession(row.id)
-            }
+            let view = DockRowView(
+                item: row,
+                onSelect: { [weak model] in model?.selectSession(row.id) },
+                onTalk: { [weak model] in model?.talkToSession(row.id) },
+                onStop: { [weak model] in model?.stopSpeaking(for: row.id) }
+            )
             rowViews.append(view)
             addSubview(view, positioned: .below, relativeTo: statusLabel)
         }
@@ -642,6 +1176,13 @@ private final class IconButtonView: NSView {
         button.target = self
         button.action = #selector(didClick)
         addSubview(button)
+    }
+
+    func setSymbol(_ name: String, tint: NSColor? = nil) {
+        button.image = NSImage(systemSymbolName: name, accessibilityDescription: name)
+        if let tint {
+            button.contentTintColor = tint
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -945,16 +1486,27 @@ private final class DockRowView: NSView {
     private let session: OverlaySessionRow
     private let iconView: AppIconView
     private let onSelect: () -> Void
+    private let onTalk: () -> Void
+    private let onStop: () -> Void
     private let nameLabel = NSTextField(labelWithString: "")
-    private let sessionIDLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(labelWithString: "")
     private let thinkingView = ShimmeringStatusView()
+    private let actionButton = NSButton()
+    private var actionHandler: (() -> Void)?
 
-    init(item: OverlaySessionRow, onSelect: @escaping () -> Void) {
+    init(
+        item: OverlaySessionRow,
+        onSelect: @escaping () -> Void,
+        onTalk: @escaping () -> Void,
+        onStop: @escaping () -> Void
+    ) {
         self.session = item
         self.iconView = AppIconView(item: item)
         self.onSelect = onSelect
+        self.onTalk = onTalk
+        self.onStop = onStop
         super.init(frame: .zero)
         identifier = NSUserInterfaceItemIdentifier("row")
         wantsLayer = true
@@ -962,6 +1514,8 @@ private final class DockRowView: NSView {
         updateBackground()
         configureSubviews()
     }
+
+    private var hasActionButton: Bool { true }
 
     required init?(coder: NSCoder) {
         nil
@@ -982,12 +1536,19 @@ private final class DockRowView: NSView {
         let iconSize: CGFloat = 36
         iconView.frame = CGRect(x: 4, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize)
 
+        let actionInset: CGFloat = hasActionButton ? 34 : 0
+        if hasActionButton {
+            actionButton.frame = CGRect(x: bounds.width - 32, y: bounds.height - 32, width: 26, height: 26)
+        } else {
+            actionButton.frame = .zero
+        }
+
         let textX: CGFloat = 46
-        let textWidth = max(0, bounds.width - textX - 6)
+        let textWidth = max(0, bounds.width - textX - 6 - actionInset)
         let elapsedWidth: CGFloat = 60
         nameLabel.frame = CGRect(x: textX, y: 4, width: max(0, textWidth - elapsedWidth - 8), height: 18)
         elapsedLabel.frame = CGRect(x: bounds.width - elapsedWidth - 6, y: 5, width: elapsedWidth, height: 16)
-        sessionIDLabel.frame = CGRect(x: textX, y: 22, width: textWidth, height: 13)
+        subtitleLabel.frame = CGRect(x: textX, y: 22, width: textWidth, height: 13)
 
         if session.isRunning {
             thinkingView.frame = CGRect(x: textX, y: 36, width: min(116, textWidth), height: 16)
@@ -1014,11 +1575,11 @@ private final class DockRowView: NSView {
         configureForSingleLineTruncation(elapsedLabel)
         addSubview(elapsedLabel)
 
-        sessionIDLabel.stringValue = session.id
-        sessionIDLabel.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        sessionIDLabel.textColor = NSColor.white.withAlphaComponent(0.48)
-        configureForSingleLineTruncation(sessionIDLabel)
-        addSubview(sessionIDLabel)
+        subtitleLabel.stringValue = session.subtitle
+        subtitleLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        subtitleLabel.textColor = NSColor.white.withAlphaComponent(0.55)
+        configureForSingleLineTruncation(subtitleLabel)
+        addSubview(subtitleLabel)
 
         summaryLabel.stringValue = session.summary
         summaryLabel.font = .systemFont(ofSize: 11, weight: .medium)
@@ -1029,6 +1590,45 @@ private final class DockRowView: NSView {
 
         thinkingView.isHidden = !session.isRunning
         addSubview(thinkingView)
+
+        configureActionButton()
+        addSubview(actionButton)
+    }
+
+    private func configureActionButton() {
+        // The per-row button is unambiguous now:
+        //   • currently speaking or listening for this session → red stop
+        //   • everything else → mic (tap to talk to this thread)
+        // No more play / replay glyph here — auto-flow handles speaking, and
+        // a mic icon clearly communicates "send a message".
+        let symbolName: String
+        let isStop: Bool
+        if session.state == .speaking || session.state == .listening {
+            symbolName = "stop.fill"
+            actionHandler = onStop
+            isStop = true
+        } else {
+            symbolName = "mic.fill"
+            actionHandler = onTalk
+            isStop = false
+        }
+
+        actionButton.isHidden = false
+        actionButton.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName)
+        actionButton.imagePosition = .imageOnly
+        actionButton.isBordered = false
+        actionButton.wantsLayer = true
+        actionButton.layer?.cornerRadius = 13
+        actionButton.layer?.backgroundColor = (isStop
+            ? NSColor.systemRed.withAlphaComponent(0.85)
+            : NSColor.white.withAlphaComponent(0.16)).cgColor
+        actionButton.contentTintColor = .white
+        actionButton.target = self
+        actionButton.action = #selector(didTapAction)
+    }
+
+    @objc private func didTapAction() {
+        actionHandler?()
     }
 
     private func updateBackground() {
@@ -1130,8 +1730,10 @@ private final class AppIconView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
+        // Agent identity drives the background color so Codex / Claude /
+        // Cursor sessions read as different at a glance.
         let path = NSBezierPath(roundedRect: bounds, xRadius: 9, yRadius: 9)
-        item.fallbackColor.setFill()
+        item.agent.color.setFill()
         path.fill()
 
         NSColor.white.withAlphaComponent(0.18).setFill()
@@ -1140,21 +1742,18 @@ private final class AppIconView: NSView {
         NSColor.black.withAlphaComponent(0.16).setFill()
         NSBezierPath(ovalIn: CGRect(x: bounds.width * 0.42, y: bounds.height * 0.42, width: bounds.width, height: bounds.height)).fill()
 
+        // While the session is active, swap to a state glyph (mic / speaker /
+        // lock / warning). Idle rows show the agent's identity glyph.
         let symbolName: String
         switch item.state {
-        case .listening:
-            symbolName = "mic.fill"
-        case .speaking:
-            symbolName = "speaker.wave.2.fill"
-        case .needsPermission:
-            symbolName = "lock.fill"
-        case .error:
-            symbolName = "exclamationmark.triangle.fill"
-        default:
-            symbolName = "terminal.fill"
+        case .listening:       symbolName = "mic.fill"
+        case .speaking:        symbolName = "speaker.wave.2.fill"
+        case .needsPermission: symbolName = "lock.fill"
+        case .error:           symbolName = "exclamationmark.triangle.fill"
+        default:               symbolName = item.agent.idleSymbol
         }
 
-        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else {
+        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName) else {
             return
         }
 
